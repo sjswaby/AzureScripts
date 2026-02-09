@@ -3,7 +3,15 @@
 
 $ErrorActionPreference = "Stop"
 
-Connect-AzAccount | Out-Null
+# Authenticate — try interactive login, fall back to existing session (e.g. CloudShell)
+try { Connect-AzAccount -ErrorAction Stop | Out-Null }
+catch { Write-Host "Interactive login unavailable, using existing context." }
+
+$ctx = Get-AzContext
+if (-not $ctx -or -not $ctx.Tenant) {
+    throw "No Azure context found. Please run Connect-AzAccount or launch from CloudShell."
+}
+$tenantId = $ctx.Tenant.Id
 
 function Get-LatestMetricAverage {
     param(
@@ -46,7 +54,7 @@ function BytesToGiB {
 
 $results = New-Object System.Collections.Generic.List[object]
 
-$subs = Get-AzSubscription
+$subs = Get-AzSubscription -TenantId $tenantId
 foreach ($sub in $subs) {
     Set-AzContext -SubscriptionId $sub.Id | Out-Null
 
