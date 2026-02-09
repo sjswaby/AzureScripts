@@ -1,12 +1,14 @@
-# Requires: Az.Accounts, Az.Resources, Az.Monitor
+# Requires: Az.Accounts, Az.Resources, Az.Storage, Az.Monitor
 # Reader RBAC is usually enough because this is control-plane metrics, not data-plane enumeration.
 
 $ErrorActionPreference = "Stop"
 
+Connect-AzAccount | Out-Null
+
 function Get-LatestMetricAverage {
     param(
-        [Parameter(Mandatory)][string]$ResourceId,
-        [Parameter(Mandatory)][string]$MetricName,
+        [Parameter(Mandatory=$true)][string]$ResourceId,
+        [Parameter(Mandatory=$true)][string]$MetricName,
         [int]$LookbackHours = 48
     )
 
@@ -23,7 +25,7 @@ function Get-LatestMetricAverage {
             -AggregationType Average
 
         $dp = $m.Data |
-            Where-Object { $_.Average -ne $null } |
+            Where-Object { $null -ne $_.Average } |
             Sort-Object TimeStamp -Descending |
             Select-Object -First 1
 
@@ -36,9 +38,10 @@ function Get-LatestMetricAverage {
     }
 }
 
-function BytesToGiB([double]$bytes) {
-    if ($bytes -eq $null) { return $null }
-    return [Math]::Round($bytes / 1GB, 2)
+function BytesToGiB {
+    param($bytes)
+    if ($null -eq $bytes) { return $null }
+    return [Math]::Round([double]$bytes / 1GB, 2)
 }
 
 $results = New-Object System.Collections.Generic.List[object]
@@ -61,26 +64,43 @@ foreach ($sub in $subs) {
 
         $usedCapacityBytes = Get-LatestMetricAverage -ResourceId $saId -MetricName "UsedCapacity"
 
-        $blobCapacityBytes = Get-LatestMetricAverage -ResourceId $blobId -MetricName "BlobCapacity"
-        $blobProvBytes     = Get-LatestMetricAverage -ResourceId $blobId -MetricName "BlobProvisionedSize"
-        $fileCapacityBytes = Get-LatestMetricAverage -ResourceId $fileId -MetricName "FileCapacity"
-        $queueCapacityBytes= Get-LatestMetricAverage -ResourceId $queueId -MetricName "QueueCapacity"
-        $tableCapacityBytes= Get-LatestMetricAverage -ResourceId $tableId -MetricName "TableCapacity"
+        $blobCapacityBytes  = Get-LatestMetricAverage -ResourceId $blobId  -MetricName "BlobCapacity"
+        $blobProvBytes      = Get-LatestMetricAverage -ResourceId $blobId  -MetricName "BlobProvisionedSize"
+        $fileCapacityBytes  = Get-LatestMetricAverage -ResourceId $fileId  -MetricName "FileCapacity"
+        $queueCapacityBytes = Get-LatestMetricAverage -ResourceId $queueId -MetricName "QueueCapacity"
+        $tableCapacityBytes = Get-LatestMetricAverage -ResourceId $tableId -MetricName "TableCapacity"
 
-        # Optional “what is being used” counts
-        $blobCount         = Get-LatestMetricAverage -ResourceId $blobId  -MetricName "BlobCount"
-        $containerCount    = Get-LatestMetricAverage -ResourceId $blobId  -MetricName "ContainerCount"
-        $fileCount         = Get-LatestMetricAverage -ResourceId $fileId  -MetricName "FileCount"
-        $fileShareCount    = Get-LatestMetricAverage -ResourceId $fileId  -MetricName "FileShareCount"
-        $queueCount        = Get-LatestMetricAverage -ResourceId $queueId -MetricName "QueueCount"
-        $queueMsgCount     = Get-LatestMetricAverage -ResourceId $queueId -MetricName "QueueMessageCount"
-        $tableCount        = Get-LatestMetricAverage -ResourceId $tableId -MetricName "TableCount"
-        $tableEntityCount  = Get-LatestMetricAverage -ResourceId $tableId -MetricName "TableEntityCount"
+        # File share provisioned quota via ARM (Reader-safe)
+        $fileProvisionedGiB = $null
+        try {
+            $shares = Get-AzRmStorageShare -ResourceGroupName $sa.ResourceGroupName `
+                -StorageAccountName $sa.Name -ErrorAction SilentlyContinue
+            if ($shares) {
+                $fileProvisionedGiB = ($shares | Measure-Object -Property QuotaGiB -Sum).Sum
+            }
+        }
+        catch { }
 
-        # “Unconsumed” only makes sense where provisioned/quota exists
+        # Optional "what is being used" counts
+        $blobCount      = Get-LatestMetricAverage -ResourceId $blobId  -MetricName "BlobCount"
+        $containerCount = Get-LatestMetricAverage -ResourceId $blobId  -MetricName "ContainerCount"
+        $fileCount      = Get-LatestMetricAverage -ResourceId $fileId  -MetricName "FileCount"
+        $fileShareCount = Get-LatestMetricAverage -ResourceId $fileId  -MetricName "FileShareCount"
+        $queueCount     = Get-LatestMetricAverage -ResourceId $queueId -MetricName "QueueCount"
+        $queueMsgCount  = Get-LatestMetricAverage -ResourceId $queueId -MetricName "QueueMessageCount"
+        $tableCount     = Get-LatestMetricAverage -ResourceId $tableId -MetricName "TableCount"
+        $tableEntityCount = Get-LatestMetricAverage -ResourceId $tableId -MetricName "TableEntityCount"
+
+        # "Unconsumed" only makes sense where provisioned/quota exists
         $blobUnconsumedBytes = $null
-        if ($blobProvBytes -ne $null -and $blobCapacityBytes -ne $null -and $blobProvBytes -gt 0) {
+        if ($null -ne $blobProvBytes -and $null -ne $blobCapacityBytes -and $blobProvBytes -gt 0) {
             $blobUnconsumedBytes = [Math]::Max(0, $blobProvBytes - $blobCapacityBytes)
+        }
+
+        $fileCapGiB = BytesToGiB $fileCapacityBytes
+        $fileUnconsumedGiB = $null
+        if ($null -ne $fileProvisionedGiB -and $null -ne $fileCapGiB -and $fileProvisionedGiB -gt 0) {
+            $fileUnconsumedGiB = [Math]::Round([Math]::Max(0, $fileProvisionedGiB - $fileCapGiB), 2)
         }
 
         $results.Add([PSCustomObject]@{
@@ -92,21 +112,24 @@ foreach ($sub in $subs) {
             UsedCapacityGiB    = BytesToGiB $usedCapacityBytes
 
             BlobCapacityGiB    = BytesToGiB $blobCapacityBytes
-            FileCapacityGiB    = BytesToGiB $fileCapacityBytes
-            QueueCapacityGiB   = BytesToGiB $queueCapacityBytes
-            TableCapacityGiB   = BytesToGiB $tableCapacityBytes
-
             BlobProvisionedGiB = BytesToGiB $blobProvBytes
             BlobUnconsumedGiB  = BytesToGiB $blobUnconsumedBytes
 
-            BlobCount          = if ($blobCount -ne $null) { [int]$blobCount } else { $null }
-            ContainerCount     = if ($containerCount -ne $null) { [int]$containerCount } else { $null }
-            FileCount          = if ($fileCount -ne $null) { [int]$fileCount } else { $null }
-            FileShareCount     = if ($fileShareCount -ne $null) { [int]$fileShareCount } else { $null }
-            QueueCount         = if ($queueCount -ne $null) { [int]$queueCount } else { $null }
-            QueueMessageCount  = if ($queueMsgCount -ne $null) { [int]$queueMsgCount } else { $null }
-            TableCount         = if ($tableCount -ne $null) { [int]$tableCount } else { $null }
-            TableEntityCount   = if ($tableEntityCount -ne $null) { [int]$tableEntityCount } else { $null }
+            FileCapacityGiB    = BytesToGiB $fileCapacityBytes
+            FileProvisionedGiB = $fileProvisionedGiB
+            FileUnconsumedGiB  = $fileUnconsumedGiB
+
+            QueueCapacityGiB   = BytesToGiB $queueCapacityBytes
+            TableCapacityGiB   = BytesToGiB $tableCapacityBytes
+
+            BlobCount          = if ($null -ne $blobCount) { [int]$blobCount } else { $null }
+            ContainerCount     = if ($null -ne $containerCount) { [int]$containerCount } else { $null }
+            FileCount          = if ($null -ne $fileCount) { [int]$fileCount } else { $null }
+            FileShareCount     = if ($null -ne $fileShareCount) { [int]$fileShareCount } else { $null }
+            QueueCount         = if ($null -ne $queueCount) { [int]$queueCount } else { $null }
+            QueueMessageCount  = if ($null -ne $queueMsgCount) { [int]$queueMsgCount } else { $null }
+            TableCount         = if ($null -ne $tableCount) { [int]$tableCount } else { $null }
+            TableEntityCount   = if ($null -ne $tableEntityCount) { [int]$tableEntityCount } else { $null }
         })
     }
 }
@@ -116,14 +139,15 @@ $results | Sort-Object SubscriptionName, StorageAccount | Format-Table -AutoSize
 
 # Totals across all accounts you can see
 $totals = [PSCustomObject]@{
-    TotalUsedGiB  = [Math]::Round(($results | Measure-Object UsedCapacityGiB -Sum).Sum, 2)
-    TotalBlobGiB  = [Math]::Round(($results | Measure-Object BlobCapacityGiB -Sum).Sum, 2)
-    TotalFileGiB  = [Math]::Round(($results | Measure-Object FileCapacityGiB -Sum).Sum, 2)
-    TotalQueueGiB = [Math]::Round(($results | Measure-Object QueueCapacityGiB -Sum).Sum, 2)
-    TotalTableGiB = [Math]::Round(($results | Measure-Object TableCapacityGiB -Sum).Sum, 2)
+    TotalUsedGiB     = [Math]::Round(($results | Measure-Object UsedCapacityGiB -Sum).Sum, 2)
+    TotalBlobGiB     = [Math]::Round(($results | Measure-Object BlobCapacityGiB -Sum).Sum, 2)
+    TotalBlobProvGiB = [Math]::Round(($results | Measure-Object BlobProvisionedGiB -Sum).Sum, 2)
+    TotalFileGiB     = [Math]::Round(($results | Measure-Object FileCapacityGiB -Sum).Sum, 2)
+    TotalFileProvGiB = [Math]::Round(($results | Measure-Object FileProvisionedGiB -Sum).Sum, 2)
+    TotalQueueGiB    = [Math]::Round(($results | Measure-Object QueueCapacityGiB -Sum).Sum, 2)
+    TotalTableGiB    = [Math]::Round(($results | Measure-Object TableCapacityGiB -Sum).Sum, 2)
 }
 $totals | Format-List
 
-# Optional export
-
+# Export
 $results | Export-Csv -NoTypeInformation -Path ".\storage-capacity-report.csv"
