@@ -1,0 +1,4 @@
+"SubscriptionName","StorageAccount","ResourceGroup","Location","UsedCapacityGiB","BlobCapacityGiB","BlobProvisionedGiB","BlobUnconsumedGiB","FileCapacityGiB","FileProvisionedGiB","FileUnconsumedGiB","QueueCapacityGiB","TableCapacityGiB","BlobCount","ContainerCount","FileCount","FileShareCount","QueueCount","QueueMessageCount","TableCount","TableEntityCount"
+"Identity","cdwfundingdevweb","cdwfunding-dev-rg","uksouth","0",,,,,,,,"0",,"1",,,,,"5","0"
+"Sandbox","sslukstranslatorstorage","ssl-uks-translator-rg","uksouth","0.02","0.02",,,,,,,"0","37","3",,,,,"8","0"
+"Sandbox","familyphotosstorage","FamilyPhotos-RG","uksouth","0",,,,,,,,"0",,"1",,,,,"9","0"

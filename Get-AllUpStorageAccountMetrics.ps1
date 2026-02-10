@@ -1,4 +1,4 @@
-# Requires: Az.Accounts, Az.Resources, Az.Storage, Az.Monitor
+# Requires: Az.Accounts, Az.Resources, Az.Storage
 # Reader RBAC is usually enough because this is control-plane metrics, not data-plane enumeration.
 
 $ErrorActionPreference = "Stop"
@@ -13,6 +13,8 @@ if (-not $ctx -or -not $ctx.Tenant) {
 }
 $tenantId = $ctx.Tenant.Id
 
+# Retrieve the most recent hourly average via the Azure Monitor REST API.
+# Uses Invoke-AzRestMethod (Az.Accounts) so there is no dependency on Az.Monitor.
 function Get-LatestMetricAverage {
     param(
         [Parameter(Mandatory=$true)][string]$ResourceId,
@@ -20,25 +22,31 @@ function Get-LatestMetricAverage {
         [int]$LookbackHours = 48
     )
 
-    $start = (Get-Date).ToUniversalTime().AddHours(-$LookbackHours)
-    $end   = (Get-Date).ToUniversalTime()
+    $start = (Get-Date).ToUniversalTime().AddHours(-$LookbackHours).ToString('yyyy-MM-ddTHH:mm:ssZ')
+    $end   = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+
+    $path = "${ResourceId}/providers/microsoft.insights/metrics" +
+            "?api-version=2024-02-01" +
+            "&metricnames=$MetricName" +
+            "&timespan=${start}/${end}" +
+            "&interval=PT1H" +
+            "&aggregation=Average"
 
     try {
-        $m = Get-AzMetric `
-            -ResourceId $ResourceId `
-            -MetricName $MetricName `
-            -TimeGrain 01:00:00 `
-            -StartTime $start `
-            -EndTime $end `
-            -AggregationType Average
+        $response = Invoke-AzRestMethod -Path $path -Method GET
+        if ($response.StatusCode -ne 200) { return $null }
 
-        $dp = $m.Data |
-            Where-Object { $null -ne $_.Average } |
-            Sort-Object TimeStamp -Descending |
+        $body       = $response.Content | ConvertFrom-Json
+        $timeseries = $body.value[0].timeseries
+        if (-not $timeseries -or $timeseries.Count -eq 0) { return $null }
+
+        $dp = $timeseries[0].data |
+            Where-Object { $null -ne $_.average } |
+            Sort-Object timeStamp -Descending |
             Select-Object -First 1
 
         if (-not $dp) { return $null }
-        return [double]$dp.Average
+        return [double]$dp.average
     }
     catch {
         # Metric not available for that resource type or no permission in that scope
@@ -130,14 +138,14 @@ foreach ($sub in $subs) {
             QueueCapacityGiB   = BytesToGiB $queueCapacityBytes
             TableCapacityGiB   = BytesToGiB $tableCapacityBytes
 
-            BlobCount          = if ($null -ne $blobCount) { [int]$blobCount } else { $null }
-            ContainerCount     = if ($null -ne $containerCount) { [int]$containerCount } else { $null }
-            FileCount          = if ($null -ne $fileCount) { [int]$fileCount } else { $null }
-            FileShareCount     = if ($null -ne $fileShareCount) { [int]$fileShareCount } else { $null }
-            QueueCount         = if ($null -ne $queueCount) { [int]$queueCount } else { $null }
-            QueueMessageCount  = if ($null -ne $queueMsgCount) { [int]$queueMsgCount } else { $null }
-            TableCount         = if ($null -ne $tableCount) { [int]$tableCount } else { $null }
-            TableEntityCount   = if ($null -ne $tableEntityCount) { [int]$tableEntityCount } else { $null }
+            BlobCount          = if ($null -ne $blobCount) { [long]$blobCount } else { $null }
+            ContainerCount     = if ($null -ne $containerCount) { [long]$containerCount } else { $null }
+            FileCount          = if ($null -ne $fileCount) { [long]$fileCount } else { $null }
+            FileShareCount     = if ($null -ne $fileShareCount) { [long]$fileShareCount } else { $null }
+            QueueCount         = if ($null -ne $queueCount) { [long]$queueCount } else { $null }
+            QueueMessageCount  = if ($null -ne $queueMsgCount) { [long]$queueMsgCount } else { $null }
+            TableCount         = if ($null -ne $tableCount) { [long]$tableCount } else { $null }
+            TableEntityCount   = if ($null -ne $tableEntityCount) { [long]$tableEntityCount } else { $null }
         })
     }
 }

@@ -8,9 +8,10 @@
   Exports: azure-sql-inventory.csv
 
 .NOTES
-  Requires: Az.Accounts, Az.Sql, Az.Monitor
+  Requires: Az.Accounts, Az.Sql, Az.Compute
   Optional: Az.SqlVirtualMachine (for SQL IaaS VM discovery)
-  Only ARM Reader access is needed. Consumed storage uses Azure Monitor metrics.
+  Only ARM Reader access is needed. Consumed storage uses the Azure Monitor REST API
+  via Invoke-AzRestMethod (no Az.Monitor module dependency).
   SQL IaaS VMs only appear if the SQL IaaS Agent extension is registered on the VM.
 #>
 
@@ -28,6 +29,8 @@ $tenantId = $ctx.Tenant.Id
 
 $outFile = ".\azure-sql-inventory.csv"
 
+# Retrieve the most recent hourly average via the Azure Monitor REST API.
+# Uses Invoke-AzRestMethod (Az.Accounts) so there is no dependency on Az.Monitor.
 function Get-LatestMetricAverage {
     param(
         [Parameter(Mandatory=$true)][string]$ResourceId,
@@ -35,25 +38,31 @@ function Get-LatestMetricAverage {
         [int]$LookbackHours = 48
     )
 
-    $start = (Get-Date).ToUniversalTime().AddHours(-$LookbackHours)
-    $end   = (Get-Date).ToUniversalTime()
+    $start = (Get-Date).ToUniversalTime().AddHours(-$LookbackHours).ToString('yyyy-MM-ddTHH:mm:ssZ')
+    $end   = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+
+    $path = "${ResourceId}/providers/microsoft.insights/metrics" +
+            "?api-version=2024-02-01" +
+            "&metricnames=$MetricName" +
+            "&timespan=${start}/${end}" +
+            "&interval=PT1H" +
+            "&aggregation=Average"
 
     try {
-        $m = Get-AzMetric `
-            -ResourceId $ResourceId `
-            -MetricName $MetricName `
-            -TimeGrain 01:00:00 `
-            -StartTime $start `
-            -EndTime $end `
-            -AggregationType Average
+        $response = Invoke-AzRestMethod -Path $path -Method GET
+        if ($response.StatusCode -ne 200) { return $null }
 
-        $dp = $m.Data |
-            Where-Object { $null -ne $_.Average } |
-            Sort-Object TimeStamp -Descending |
+        $body       = $response.Content | ConvertFrom-Json
+        $timeseries = $body.value[0].timeseries
+        if (-not $timeseries -or $timeseries.Count -eq 0) { return $null }
+
+        $dp = $timeseries[0].data |
+            Where-Object { $null -ne $_.average } |
+            Sort-Object timeStamp -Descending |
             Select-Object -First 1
 
         if (-not $dp) { return $null }
-        return [double]$dp.Average
+        return [double]$dp.average
     }
     catch { return $null }
 }
