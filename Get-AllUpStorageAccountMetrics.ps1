@@ -3,10 +3,7 @@
 
 $ErrorActionPreference = "Stop"
 
-# Authenticate — try interactive login, fall back to existing session (e.g. CloudShell)
-try { Connect-AzAccount -ErrorAction Stop | Out-Null }
-catch { Write-Host "Interactive login unavailable, using existing context." }
-
+# Use existing context (CloudShell / already-authenticated session)
 $ctx = Get-AzContext
 if (-not $ctx -or -not $ctx.Tenant) {
     throw "No Azure context found. Please run Connect-AzAccount or launch from CloudShell."
@@ -63,13 +60,26 @@ function BytesToGiB {
 $results = New-Object System.Collections.Generic.List[object]
 
 $subs = Get-AzSubscription -TenantId $tenantId
+$subIndex = 0
 foreach ($sub in $subs) {
-    Set-AzContext -SubscriptionId $sub.Id | Out-Null
+    $subIndex++
+    Write-Host "[$subIndex/$($subs.Count)] Subscription: $($sub.Name) ($($sub.Id))" -ForegroundColor Cyan
+
+    try {
+        Set-AzContext -SubscriptionId $sub.Id -ErrorAction Stop | Out-Null
+    }
+    catch {
+        Write-Warning "  Skipping subscription '$($sub.Name)' — unable to set context: $_"
+        continue
+    }
 
     # List storage accounts via ARM (Reader-safe)
     $storageAccounts = Get-AzResource -ResourceType "Microsoft.Storage/storageAccounts"
+    $saIndex = 0
 
     foreach ($sa in $storageAccounts) {
+        $saIndex++
+        Write-Host "  [$saIndex/$($storageAccounts.Count)] Storage account: $($sa.Name)" -ForegroundColor White
         $saId = $sa.ResourceId
 
         # Service resourceIds
@@ -149,6 +159,8 @@ foreach ($sub in $subs) {
         })
     }
 }
+
+Write-Host "`nProcessing complete. $($results.Count) storage accounts found." -ForegroundColor Green
 
 # Per-account output
 $results | Sort-Object SubscriptionName, StorageAccount | Format-Table -AutoSize

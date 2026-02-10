@@ -17,10 +17,7 @@
 
 $ErrorActionPreference = "Stop"
 
-# Authenticate — try interactive login, fall back to existing session (e.g. CloudShell)
-try { Connect-AzAccount -ErrorAction Stop | Out-Null }
-catch { Write-Host "Interactive login unavailable, using existing context." }
-
+# Use existing context (CloudShell / already-authenticated session)
 $ctx = Get-AzContext
 if (-not $ctx -or -not $ctx.Tenant) {
     throw "No Azure context found. Please run Connect-AzAccount or launch from CloudShell."
@@ -70,14 +67,27 @@ function Get-LatestMetricAverage {
 $results = New-Object System.Collections.Generic.List[object]
 
 $subs = Get-AzSubscription -TenantId $tenantId
+$subIndex = 0
 foreach ($sub in $subs) {
-    Set-AzContext -SubscriptionId $sub.Id | Out-Null
+    $subIndex++
+    Write-Host "[$subIndex/$($subs.Count)] Subscription: $($sub.Name) ($($sub.Id))" -ForegroundColor Cyan
+
+    try {
+        Set-AzContext -SubscriptionId $sub.Id -ErrorAction Stop | Out-Null
+    }
+    catch {
+        Write-Warning "  Skipping subscription '$($sub.Name)' — unable to set context: $_"
+        continue
+    }
 
     # ── Azure SQL Database servers ──────────────────────────────────────────────
     $sqlServers = @()
     try { $sqlServers = Get-AzSqlServer -ErrorAction Stop } catch { }
 
+    $serverIndex = 0
     foreach ($server in $sqlServers) {
+        $serverIndex++
+        Write-Host "  [$serverIndex/$($sqlServers.Count)] SQL Server: $($server.ServerName)" -ForegroundColor White
         $serverRg = $server.ResourceGroupName
 
         # ── Elastic Pools on this server ──
@@ -156,7 +166,10 @@ foreach ($sub in $subs) {
     $managedInstances = @()
     try { $managedInstances = Get-AzSqlInstance -ErrorAction Stop } catch { }
 
+    $miIndex = 0
     foreach ($mi in $managedInstances) {
+        $miIndex++
+        Write-Host "  [$miIndex/$($managedInstances.Count)] Managed Instance: $($mi.ManagedInstanceName)" -ForegroundColor White
         $miStorageUsedMB = Get-LatestMetricAverage -ResourceId $mi.Id -MetricName "storage_space_used_mb"
 
         $results.Add([PSCustomObject]@{
@@ -222,7 +235,10 @@ foreach ($sub in $subs) {
         }
     }
 
+    $sqlVmIndex = 0
     foreach ($sqlvm in $sqlVMs) {
+        $sqlVmIndex++
+        Write-Host "  [$sqlVmIndex/$($sqlVMs.Count)] SQL IaaS VM: $($sqlvm.Name)" -ForegroundColor White
         $vmResId     = $sqlvm.VirtualMachineResourceId
         $vmSize      = $null
         $totalDiskGB = $null
@@ -290,6 +306,8 @@ foreach ($sub in $subs) {
         })
     }
 }
+
+Write-Host "`nProcessing complete. $($results.Count) SQL resources found." -ForegroundColor Green
 
 # Export and display
 $results | Sort-Object SubscriptionName, SqlType, ServerName, ResourceName |

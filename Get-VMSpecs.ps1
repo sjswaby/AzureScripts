@@ -13,10 +13,7 @@
 
 $ErrorActionPreference = "Stop"
 
-# Authenticate — try interactive login, fall back to existing session (e.g. CloudShell)
-try { Connect-AzAccount -ErrorAction Stop | Out-Null }
-catch { Write-Host "Interactive login unavailable, using existing context." }
-
+# Use existing context (CloudShell / already-authenticated session)
 $ctx = Get-AzContext
 if (-not $ctx -or -not $ctx.Tenant) {
     throw "No Azure context found. Please run Connect-AzAccount or launch from CloudShell."
@@ -112,14 +109,27 @@ $vmSummaryRows = New-Object System.Collections.Generic.List[object]
 $vmDiskRows    = New-Object System.Collections.Generic.List[object]
 
 $subs = Get-AzSubscription -TenantId $tenantId
+$subIndex = 0
 foreach ($sub in $subs) {
-    Set-AzContext -SubscriptionId $sub.Id | Out-Null
+    $subIndex++
+    Write-Host "[$subIndex/$($subs.Count)] Subscription: $($sub.Name) ($($sub.Id))" -ForegroundColor Cyan
+
+    try {
+        Set-AzContext -SubscriptionId $sub.Id -ErrorAction Stop | Out-Null
+    }
+    catch {
+        Write-Warning "  Skipping subscription '$($sub.Name)' — unable to set context: $_"
+        continue
+    }
 
     # Get VMs with instance view (power state)
     $vms = Get-AzVM -Status
+    $vmIndex = 0
 
     foreach ($vm in $vms) {
+        $vmIndex++
         $vmName = $vm.Name
+        Write-Host "  [$vmIndex/$($vms.Count)] VM: $vmName" -ForegroundColor White
         $rgName = $vm.ResourceGroupName
         $loc    = $vm.Location
         $size   = $vm.HardwareProfile.VmSize
@@ -224,6 +234,8 @@ foreach ($sub in $subs) {
         }
     }
 }
+
+Write-Host "`nProcessing complete. $($vmSummaryRows.Count) VMs, $($vmDiskRows.Count) disks found." -ForegroundColor Green
 
 $vmSummaryRows | Sort-Object SubscriptionName, ResourceGroup, VMName |
     Export-Csv -NoTypeInformation -Path $outVmSummary
